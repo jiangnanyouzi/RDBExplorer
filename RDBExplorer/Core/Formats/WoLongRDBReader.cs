@@ -97,7 +97,7 @@ namespace RDBExplorer.Core.Formats
             byte[] nameBytes = reader.ReadBytes(metadataSize);
             string nameStr = Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
 
-            // Parse "hexoffset@hexsize" format
+            // Parse "hexoffset@hexsize" format into location data
             int atIdx = nameStr.IndexOf('@');
             if (atIdx > 0)
             {
@@ -106,8 +106,8 @@ namespace RDBExplorer.Core.Formats
                 entry.Location.ContainerPath = _rdbBinName;
             }
 
-            // Set name directly (WoLong embeds names in entries)
-            entry.Name = nameStr;
+            // Note: WoLong's nameStr is "offset@size" location data, not a real name.
+            // Leave entry.Name null so UI falls back to 0x{FileKtid:X8}.
 
             // Determine storage flags from entry Flags field
             uint flags = (uint)entry.Flags;
