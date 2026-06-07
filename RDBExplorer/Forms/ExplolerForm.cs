@@ -39,6 +39,7 @@ namespace RDBExplorer.Forms
             archiveList.FullRowSelect = true;
             archiveList.GridLines = true;
             archiveList.Columns.Clear();
+            archiveList.Columns.Add("#", 60);
             archiveList.Columns.Add("Name", 250);
             archiveList.Columns.Add("Type", 200);
             archiveList.Columns.Add("Size", 100);
@@ -144,11 +145,12 @@ namespace RDBExplorer.Forms
             {
                 int result = e.Column switch
                 {
-                    0 => string.Compare(x.Name, y.Name),
-                    1 => string.Compare(x.TypeName, y.TypeName),
-                    2 => x.FileSize.CompareTo(y.FileSize),
-                    3 => string.Compare(x.Location.ContainerPath, y.Location.ContainerPath),
-                    4 => x.FileKtid.CompareTo(y.FileKtid),
+                    0 => 0, // # column: no sort
+                    1 => string.Compare(x.Name, y.Name),
+                    2 => string.Compare(x.TypeName, y.TypeName),
+                    3 => x.FileSize.CompareTo(y.FileSize),
+                    4 => string.Compare(x.Location.ContainerPath, y.Location.ContainerPath),
+                    5 => x.FileKtid.CompareTo(y.FileKtid),
                     _ => 0
                 };
                 return (_sortOrder == SortOrder.Ascending) ? result : -result;
@@ -164,7 +166,8 @@ namespace RDBExplorer.Forms
                 var entry = _filteredDisplayList[e.ItemIndex];
                 string displayName = !string.IsNullOrEmpty(entry.Name) ? entry.Name : $"0x{entry.FileKtid:X8}";
 
-                ListViewItem lvi = new ListViewItem(displayName);
+                ListViewItem lvi = new ListViewItem((e.ItemIndex + 1).ToString());
+                lvi.SubItems.Add(displayName);
                 lvi.SubItems.Add(entry.TypeName ?? "");
                 lvi.SubItems.Add(Sizer.Suffix(entry.FileSize, 2));
                 lvi.SubItems.Add(entry.Location.ContainerPath ?? "");
