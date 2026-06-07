@@ -30,6 +30,7 @@ namespace RDBExplorer.Core
 
         public List<RDBEntry> RDBEntries { get; private set; }
         private Dictionary<uint, RDBEntry> _ktidCache = new();
+        private bool _isWoLong = false;
 
         private string _workDir;
 
@@ -40,9 +41,32 @@ namespace RDBExplorer.Core
                 return;
             }
             _workDir = Path.GetDirectoryName(rdbFilePath);
-            var rdb = new RDBReader();
-            RDBEntries = rdb.Read(rdbFilePath);
-            _ktidCache = RDBEntries.GroupBy(e => e.FileKtid).ToDictionary(g => g.Key, g => g.First());
+
+            // Detect format: .rdx exists -> Nioh 3, .rdb.bin exists -> WoLong
+            string rdxPath = Path.Combine(_workDir,
+                Path.GetFileNameWithoutExtension(rdbFilePath) + ".rdx");
+            string rdbBinPath = rdbFilePath + ".bin";
+
+            if (File.Exists(rdxPath))
+            {
+                _isWoLong = false;
+                var rdb = new RDBReader();
+                RDBEntries = rdb.Read(rdbFilePath);
+            }
+            else if (File.Exists(rdbBinPath))
+            {
+                _isWoLong = true;
+                var rdb = new WoLongRDBReader();
+                RDBEntries = rdb.Read(rdbFilePath);
+            }
+            else
+            {
+                throw new FileNotFoundException(
+                    "Neither .rdx nor .rdb.bin found alongside the RDB file.");
+            }
+
+            _ktidCache = RDBEntries.GroupBy(e => e.FileKtid)
+                .ToDictionary(g => g.Key, g => g.First());
         }
 
         public byte[]? GetEntryData(RDBEntry entry)
@@ -58,7 +82,12 @@ namespace RDBExplorer.Core
             using (var reader = new BinaryReader(fsInput))
             {
                 long fileOffsetInContainer = 0L;
-                if (entry.Location.NewFlags == RDBFlagsNew.Internal)
+                if (_isWoLong)
+                {
+                    // WoLong: offset is stored directly in Location.Offset
+                    fileOffsetInContainer = (long)entry.Location.Offset;
+                }
+                else if (entry.Location.NewFlags == RDBFlagsNew.Internal)
                 {
                     fileOffsetInContainer = (long)entry.Location.Offset;
                 }
@@ -186,7 +215,11 @@ namespace RDBExplorer.Core
                 string fileName = string.Empty;
                 if (withName)
                 {
-                    fileName = entry.Name ?? $"0x{entry.FileKtid:X8}{TypeIDHelper.GetExtension(entry.TypeInfoKtid)}";
+                    // WoLong entries have embedded names; sanitize for filesystem
+                    if (_isWoLong && !string.IsNullOrEmpty(entry.Name))
+                        fileName = entry.Name.Replace("@", "_");
+                    else
+                        fileName = entry.Name ?? $"0x{entry.FileKtid:X8}{TypeIDHelper.GetExtension(entry.TypeInfoKtid)}";
                 }
                 else
                 {
