@@ -30,6 +30,7 @@ namespace RDBExplorer.Core
 
         public List<RDBEntry> RDBEntries { get; private set; }
         private Dictionary<uint, RDBEntry> _ktidCache = new();
+        private Dictionary<uint, RDBEntry> _ktidHashNameCache = new();
         private bool _isWoLong = false;
 
         private string _workDir;
@@ -67,6 +68,13 @@ namespace RDBExplorer.Core
 
             _ktidCache = RDBEntries.GroupBy(e => e.FileKtid)
                 .ToDictionary(g => g.Key, g => g.First());
+
+            // WoLong: build hash_name -> entry cache from .rdb.bin IDRK blocks
+            _ktidHashNameCache.Clear();
+            if (_isWoLong)
+            {
+                BuildHashNameCache(rdbFilePath);
+            }
         }
 
         public byte[]? GetEntryData(RDBEntry entry)
@@ -369,9 +377,64 @@ namespace RDBExplorer.Core
             }
         }
 
+        private void BuildHashNameCache(string rdbFilePath)
+        {
+            // Scan .rdb.bin IDRK blocks to map hash_name -> RDB entry by offset
+            string binPath = rdbFilePath + ".bin";
+            if (!File.Exists(binPath)) return;
+
+            // Build offset -> entry lookup for internal entries
+            var offsetMap = RDBEntries
+                .Where(e => e.Location.Offset > 0 && !string.IsNullOrEmpty(e.Location.ContainerPath))
+                .ToDictionary(e => (long)e.Location.Offset, e => e);
+
+            using (var fs = new FileStream(binPath, FileMode.Open, FileAccess.Read))
+            using (var reader = new BinaryReader(fs))
+            {
+                // Skip PDRK header (16 bytes)
+                fs.Seek(16, SeekOrigin.Begin);
+
+                while (fs.Position < fs.Length)
+                {
+                    // Align to 16 bytes
+                    long aligned = (fs.Position + 15) & ~15L;
+                    if (aligned > fs.Position)
+                        fs.Seek(aligned, SeekOrigin.Begin);
+
+                    long blockStart = fs.Position;
+                    if (fs.Position + 56 > fs.Length) break;
+
+                    string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
+                    if (magic != "IDRK") break;
+
+                    reader.ReadBytes(4); // version
+                    long allBlockSize = reader.ReadInt64();
+                    reader.ReadBytes(8 + 8); // compressedSize, uncompressedSize
+                    int paramDataSize = reader.ReadInt32();
+                    int hashName = reader.ReadInt32();
+                    uint hashNameU = (uint)hashName;
+
+                    // Map this block's hash_name to the RDB entry at this offset
+                    if (hashNameU != 0 && offsetMap.TryGetValue(blockStart, out var entry))
+                    {
+                        if (!_ktidHashNameCache.ContainsKey(hashNameU))
+                            _ktidHashNameCache[hashNameU] = entry;
+                    }
+
+                    // Skip to next block
+                    fs.Seek(blockStart + 8 + allBlockSize, SeekOrigin.Begin);
+                }
+            }
+        }
+
         public RDBEntry? FindEntryByKtId(uint ktid)
         {
             if (_ktidCache.TryGetValue(ktid, out var entry))
+            {
+                return entry;
+            }
+            // WoLong fallback: lookup by IDRK block hash_name
+            if (_ktidHashNameCache.TryGetValue(ktid, out entry))
             {
                 return entry;
             }
