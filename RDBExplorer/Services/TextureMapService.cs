@@ -51,10 +51,7 @@ namespace RDBExplorer.Services
         {
             lock (_lock)
             {
-                if (_instance == null)
-                {
-                    _instance = new TextureMapService(path);
-                }
+                _instance = new TextureMapService(path);
             }
         }
     }

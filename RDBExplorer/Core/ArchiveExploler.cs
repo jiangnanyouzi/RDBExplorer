@@ -220,18 +220,29 @@ namespace RDBExplorer.Core
                     return new WorkerStatus(false, "Failed to get entry data");
                 }
 
+                string extension = TypeIDHelper.GetExtension(entry.TypeInfoKtid);
+                // Synthetic entries (from hash_name cache) have TypeInfoKtid=0;
+                // detect extension from data magic bytes
+                if (string.IsNullOrEmpty(extension) && data.Length >= 4)
+                {
+                    string magic = Encoding.ASCII.GetString(data, 0, 4);
+                    if (magic == "GT1G") extension = ".g1t";
+                    else if (magic == "MG1G") extension = ".g1m";
+                    else if (magic == "TOC\0" || magic == "COT\0") extension = ".toc";
+                }
+
                 string fileName = string.Empty;
                 if (withName)
                 {
                     // WoLong entries have embedded names; sanitize for filesystem
-                    if (_isWoLong && !string.IsNullOrEmpty(entry.Name))
+                    if (_isWoLong && !string.IsNullOrEmpty(entry.Name) && entry.TypeInfoKtid != 0)
                         fileName = entry.Name.Replace("@", "_");
                     else
-                        fileName = entry.Name ?? $"0x{entry.FileKtid:X8}{TypeIDHelper.GetExtension(entry.TypeInfoKtid)}";
+                        fileName = $"0x{entry.FileKtid:X8}{extension}";
                 }
                 else
                 {
-                    fileName = $"0x{entry.FileKtid:X8}{TypeIDHelper.GetExtension(entry.TypeInfoKtid)}";
+                    fileName = $"0x{entry.FileKtid:X8}{extension}";
                 }
                 string outPath = Path.Combine(outputFolder, fileName);
                 string directory = Path.GetDirectoryName(outPath);
@@ -429,6 +440,7 @@ namespace RDBExplorer.Core
                             {
                                 _ktidHashNameCache[hashNameU] = new RDBEntry
                                 {
+                                    FileKtid = hashNameU,
                                     Location = new EntryLocation
                                     {
                                         ContainerPath = binName,

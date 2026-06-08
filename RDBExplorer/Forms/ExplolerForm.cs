@@ -430,6 +430,9 @@ namespace RDBExplorer.Forms
                 archiveList.Enabled = false;
                 _contextMenu.Enabled = false;
 
+                int exportedCount = 0;
+                int failedCount = 0;
+
                 await Task.Run(() =>
                 {
                     this.Invoke(new Action(() => toolStripStatusLabel.Text = $"Exporting model: {entry.Name}..."));
@@ -448,15 +451,23 @@ namespace RDBExplorer.Forms
                             {
                                 this.Invoke(new Action(() => toolStripStatusLabel.Text = $"Exporting texture {i + 1}/{textureHashes.Length}: 0x{texHash:X8}"));
                                 _archiveExploler.Extract(texEntry, targetDir, true);
+                                exportedCount++;
+                            }
+                            else
+                            {
+                                failedCount++;
+                                Console.WriteLine($"[Export] Texture not found: 0x{texHash:X8}");
                             }
                             this.Invoke(new Action(() => progressBarOperation.Value = Math.Min(i + 2, totalSteps)));
                         }
                     }
                 });
 
-                // toolStripStatusLabel.Text = $"Successfully exported to: {targetDir}";
-                MessageBox.Show($"Export finished!\nModel and {textureHashes?.Length ?? 0} textures saved to folder.",
-                                "Export Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                int totalTextures = textureHashes?.Length ?? 0;
+                string message = failedCount > 0
+                    ? $"Export finished!\nModel and {exportedCount}/{totalTextures} textures saved to folder.\n{failedCount} texture(s) could not be found."
+                    : $"Export finished!\nModel and {exportedCount} textures saved to folder.";
+                MessageBox.Show(message, "Export Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
@@ -1025,6 +1036,11 @@ namespace RDBExplorer.Forms
                     });
 
                     await generator.GenerateAndSaveJson(sfd.FileName, progress);
+
+                    // Update settings and reload TextureMapService with the generated file
+                    SettingsService.Instance.Config.ModelsAndTextutesDatabasePath = sfd.FileName;
+                    SettingsService.Instance.Save();
+                    TextureMapService.Initialize(sfd.FileName);
 
                     MessageBox.Show("Model database successfully generated!", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
