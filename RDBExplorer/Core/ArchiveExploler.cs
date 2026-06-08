@@ -379,50 +379,73 @@ namespace RDBExplorer.Core
 
         private void BuildHashNameCache(string rdbFilePath)
         {
-            // Scan .rdb.bin IDRK blocks to map hash_name -> RDB entry by offset
-            string binPath = rdbFilePath + ".bin";
-            if (!File.Exists(binPath)) return;
+            // WoLong: ObjectDatabase may reference KTID tables in OTHER .rdb.bin files.
+            // Scan ALL .rdb.bin files in the same directory to build hash_name -> entry map.
+            string? dir = Path.GetDirectoryName(rdbFilePath);
+            if (string.IsNullOrEmpty(dir)) return;
 
-            // Build offset -> entry lookup for internal entries
+            // Build offset -> entry lookup for currently opened RDB
             var offsetMap = RDBEntries
                 .Where(e => e.Location.Offset > 0 && !string.IsNullOrEmpty(e.Location.ContainerPath))
-                .ToDictionary(e => (long)e.Location.Offset, e => e);
+                .GroupBy(e => (long)e.Location.Offset)
+                .ToDictionary(g => g.Key, g => g.First());
 
-            using (var fs = new FileStream(binPath, FileMode.Open, FileAccess.Read))
-            using (var reader = new BinaryReader(fs))
+            foreach (var binFile in Directory.GetFiles(dir, "*.rdb.bin"))
             {
-                // Skip PDRK header (16 bytes)
-                fs.Seek(16, SeekOrigin.Begin);
+                string binName = Path.GetFileName(binFile);
 
-                while (fs.Position < fs.Length)
+                using (var fs = new FileStream(binFile, FileMode.Open, FileAccess.Read))
+                using (var reader = new BinaryReader(fs))
                 {
-                    // Align to 16 bytes
-                    long aligned = (fs.Position + 15) & ~15L;
-                    if (aligned > fs.Position)
-                        fs.Seek(aligned, SeekOrigin.Begin);
+                    if (fs.Length < 16) continue;
+                    fs.Seek(16, SeekOrigin.Begin); // skip PDRK header
 
-                    long blockStart = fs.Position;
-                    if (fs.Position + 56 > fs.Length) break;
-
-                    string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
-                    if (magic != "IDRK") break;
-
-                    reader.ReadBytes(4); // version
-                    long allBlockSize = reader.ReadInt64();
-                    reader.ReadBytes(8 + 8); // compressedSize, uncompressedSize
-                    int paramDataSize = reader.ReadInt32();
-                    int hashName = reader.ReadInt32();
-                    uint hashNameU = (uint)hashName;
-
-                    // Map this block's hash_name to the RDB entry at this offset
-                    if (hashNameU != 0 && offsetMap.TryGetValue(blockStart, out var entry))
+                    while (fs.Position < fs.Length)
                     {
-                        if (!_ktidHashNameCache.ContainsKey(hashNameU))
-                            _ktidHashNameCache[hashNameU] = entry;
-                    }
+                        long aligned = (fs.Position + 15) & ~15L;
+                        if (aligned > fs.Position)
+                            fs.Seek(aligned, SeekOrigin.Begin);
 
-                    // Skip to next block
-                    fs.Seek(blockStart + 8 + allBlockSize, SeekOrigin.Begin);
+                        long blockStart = fs.Position;
+                        if (fs.Position + 56 > fs.Length) break;
+
+                        string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
+                        if (magic != "IDRK") break;
+
+                        reader.ReadBytes(4); // version
+                        long allBlockSize = reader.ReadInt64();
+                        reader.ReadBytes(8 + 8); // compressedSize, uncompressedSize
+                        int paramDataSize = reader.ReadInt32();
+                        int hashName = reader.ReadInt32();
+                        uint hashNameU = (uint)hashName;
+                        // skip remaining header: hashType, flags, resourceId, paramCount
+                        reader.ReadBytes(4 + 4 + 4 + 4);
+
+                        if (hashNameU != 0 && !_ktidHashNameCache.ContainsKey(hashNameU))
+                        {
+                            // Try match with an existing entry from current RDB
+                            if (offsetMap.TryGetValue(blockStart, out var existing))
+                            {
+                                _ktidHashNameCache[hashNameU] = existing;
+                            }
+                            else
+                            {
+                                // Create a synthetic entry pointing to this block in the other .rdb.bin
+                                _ktidHashNameCache[hashNameU] = new RDBEntry
+                                {
+                                    Location = new EntryLocation
+                                    {
+                                        ContainerPath = binName,
+                                        Offset = (ulong)blockStart,
+                                        NewFlags = RDBFlagsNew.Internal,
+                                    }
+                                };
+                            }
+                        }
+
+                        // Skip to next block
+                        fs.Seek(blockStart + 8 + allBlockSize, SeekOrigin.Begin);
+                    }
                 }
             }
         }
