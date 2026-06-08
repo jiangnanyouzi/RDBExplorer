@@ -379,12 +379,9 @@ namespace RDBExplorer.Core
 
         private void BuildHashNameCache(string rdbFilePath)
         {
-            // WoLong: ObjectDatabase may reference KTID tables in OTHER .rdb.bin files.
-            // Scan ALL .rdb.bin files in the same directory to build hash_name -> entry map.
             string? dir = Path.GetDirectoryName(rdbFilePath);
             if (string.IsNullOrEmpty(dir)) return;
 
-            // Build offset -> entry lookup for currently opened RDB
             var offsetMap = RDBEntries
                 .Where(e => e.Location.Offset > 0 && !string.IsNullOrEmpty(e.Location.ContainerPath))
                 .GroupBy(e => (long)e.Location.Offset)
@@ -393,12 +390,13 @@ namespace RDBExplorer.Core
             foreach (var binFile in Directory.GetFiles(dir, "*.rdb.bin"))
             {
                 string binName = Path.GetFileName(binFile);
+                int fileCount = 0;
 
                 using (var fs = new FileStream(binFile, FileMode.Open, FileAccess.Read))
                 using (var reader = new BinaryReader(fs))
                 {
                     if (fs.Length < 16) continue;
-                    fs.Seek(16, SeekOrigin.Begin); // skip PDRK header
+                    fs.Seek(16, SeekOrigin.Begin);
 
                     while (fs.Position < fs.Length)
                     {
@@ -407,7 +405,7 @@ namespace RDBExplorer.Core
                             fs.Seek(aligned, SeekOrigin.Begin);
 
                         long blockStart = fs.Position;
-                        if (fs.Position + 56 > fs.Length) break;
+                        if (blockStart + 56 > fs.Length) break;
 
                         string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
                         if (magic != "IDRK") break;
@@ -416,21 +414,19 @@ namespace RDBExplorer.Core
                         long allBlockSize = reader.ReadInt64();
                         reader.ReadBytes(8 + 8); // compressedSize, uncompressedSize
                         int paramDataSize = reader.ReadInt32();
-                        int hashName = reader.ReadInt32();
-                        uint hashNameU = (uint)hashName;
-                        // skip remaining header: hashType, flags, resourceId, paramCount
-                        reader.ReadBytes(4 + 4 + 4 + 4);
+                        uint hashNameU = (uint)reader.ReadInt32();
+                        int hashType = reader.ReadInt32();
+                        reader.ReadBytes(4 + 4); // flags, resourceId
+                        int paramCount = reader.ReadInt32();
 
                         if (hashNameU != 0 && !_ktidHashNameCache.ContainsKey(hashNameU))
                         {
-                            // Try match with an existing entry from current RDB
                             if (offsetMap.TryGetValue(blockStart, out var existing))
                             {
                                 _ktidHashNameCache[hashNameU] = existing;
                             }
                             else
                             {
-                                // Create a synthetic entry pointing to this block in the other .rdb.bin
                                 _ktidHashNameCache[hashNameU] = new RDBEntry
                                 {
                                     Location = new EntryLocation
@@ -441,12 +437,20 @@ namespace RDBExplorer.Core
                                     }
                                 };
                             }
+                            fileCount++;
                         }
 
-                        // Skip to next block
-                        fs.Seek(blockStart + 8 + allBlockSize, SeekOrigin.Begin);
+                        // Skip params + paramData + compressed data
+                        int paramsSize = paramCount * 12;
+                        reader.ReadBytes(paramsSize + paramDataSize);
+                        long dataRemaining = allBlockSize - (fs.Position - blockStart);
+                        if (dataRemaining > 0)
+                            reader.ReadBytes((int)dataRemaining);
+                        long nextPos = (fs.Position + 15) & ~15L;
+                        fs.Seek(nextPos, SeekOrigin.Begin);
                     }
                 }
+                Console.WriteLine($"[BuildHashNameCache] {binName}: added {fileCount} (total: {_ktidHashNameCache.Count})");
             }
         }
 

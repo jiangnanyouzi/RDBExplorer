@@ -143,14 +143,21 @@ namespace RDBExplorer.Services
             var tableEntry = _explorer.FindEntryByKtId(tableHash);
             if (tableEntry == null)
             {
+                Console.WriteLine($"[WoLong Debug] FindEntryByKtId FAILED for 0x{tableHash:X8}");
                 return textures;
             }
+
+            Console.WriteLine($"[WoLong Debug] FindEntryByKtId OK for 0x{tableHash:X8}, container={tableEntry.Location.ContainerPath}");
 
             byte[]? data = _explorer.GetEntryData(tableEntry);
             if (data == null)
             {
+                Console.WriteLine($"[WoLong Debug] GetEntryData returned null for 0x{tableHash:X8}");
                 return textures;
             }
+
+            Console.WriteLine($"[WoLong Debug] GetEntryData OK, data length={data.Length}");
+
             var ktidParser = new KTIDParser();
             ktidParser.Load(data);
 
