@@ -29,7 +29,7 @@ namespace Metanoia.Rendering
         public void LoadShader(string FilePath, ShaderType Type)
         {
             var shaderid = GL.CreateShader(Type);
-            GL.ShaderSource(shaderid, System.IO.File.ReadAllText(FilePath));
+            GL.ShaderSource(shaderid, System.IO.File.ReadAllText(ResolveShaderPath(FilePath)));
             GL.CompileShader(shaderid);
 
             switch (Type)
@@ -66,12 +66,28 @@ namespace Metanoia.Rendering
             }
             if (FragmentID != -1)
             {
-                GL.DetachShader(FragmentID, FragmentID);
+                GL.DetachShader(ProgramID, FragmentID);
                 GL.DeleteShader(FragmentID);
                 FragmentID = -1;
             }
 
             Linked = true;
+        }
+
+        private static string ResolveShaderPath(string filePath)
+        {
+            if (System.IO.File.Exists(filePath))
+            {
+                return filePath;
+            }
+
+            string basePath = System.IO.Path.Combine(AppContext.BaseDirectory, filePath);
+            if (System.IO.File.Exists(basePath))
+            {
+                return basePath;
+            }
+
+            throw new System.IO.FileNotFoundException($"Shader file not found: {filePath}", basePath);
         }
 
         public int GetAttributeLocation(string Name)

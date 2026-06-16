@@ -21,6 +21,13 @@ namespace RDBExplorer.Core.Formats.G1M
         public List<INunoEntry> NunoEntries = new List<INunoEntry>();
         public List<G1MGPropertySet> G1MGProperties  = new();
         public ushort[] BoneIDList;
+        public bool IsStreamingMeshlet;
+        public List<G1MStreamingSectionInternal> StreamingSections = new();
+        public List<G1MStreamingQuantizationInternal> StreamingQuantizations = new();
+        public List<G1MStreamingMeshletTriangleInternal> StreamingMeshletTriangles = new();
+        public List<G1MStreamingMeshletDescriptorInternal> StreamingMeshlets = new();
+        public List<G1MStreamingMeshletBoundsInternal> StreamingMeshletBounds = new();
+        public List<G1MStreamingMeshletMapInternal> StreamingMeshletMap = new();
 
 
         public Vector3 PositionScale { get; private set; } = Vector3.One;
@@ -52,11 +59,13 @@ namespace RDBExplorer.Core.Formats.G1M
 
                 switch (resourceHeader.Magic)
                 {
-                    case 0x47314D53: // G1MS
+                    case 0x47314D53: // SM1G
+                    case 0x534D3147: // G1MS
                         // ReadSkeltonInfoSection
                         ParseG1MS(r, start);
                         break;
-                    case 0x47314D47: // G1MG
+                    case 0x47314D47: // GM1G
+                    case 0x474D3147: // G1MG
                         // ReadGeometryPallete
                         ParseG1MG(r, start, resourceHeader.Version);
                         break;
@@ -160,6 +169,7 @@ namespace RDBExplorer.Core.Formats.G1M
 
         public struct GeometrySection
         {
+            public uint Magic { get; set; }
             public GeometrySectionType Type { get; set; }
             public ushort Version { get; set; }
             public uint Size { get; set; }
@@ -205,10 +215,21 @@ namespace RDBExplorer.Core.Formats.G1M
             uint sectionCount = r.ReadUInt32();
             g1MGHeader.SectionCount = sectionCount;
 
+            long sectionsStart = r.BaseStream.Position;
+            bool hasStreamingMeshletSections = HasStreamingMeshletSections(r, sectionsStart, sectionCount);
+            r.BaseStream.Position = sectionsStart;
+
             for (int i = 0; i < sectionCount; i++)
             {
                 long secStart = r.BaseStream.Position;
-                GeometrySection geometrySection = r.ReadStruct<GeometrySection>();
+                GeometrySection geometrySection = ReadGeometrySection(r);
+
+                if (hasStreamingMeshletSections && IsStreamingMeshletSectionMagic(geometrySection.Magic))
+                {
+                    ParseStreamingMeshletSection(r, geometrySection);
+                    r.BaseStream.Position = secStart + geometrySection.Size;
+                    continue;
+                }
 
                 switch (geometrySection.Type)
                 {
@@ -286,6 +307,207 @@ namespace RDBExplorer.Core.Formats.G1M
                 }
 
                 r.BaseStream.Position = secStart + geometrySection.Size;
+            }
+        }
+
+        private GeometrySection ReadGeometrySection(BinaryReader r)
+        {
+            uint magic = r.ReadUInt32();
+            return new GeometrySection
+            {
+                Magic = magic,
+                Version = (ushort)(magic >> 16),
+                Type = (GeometrySectionType)(magic & 0xFFFF),
+                Size = r.ReadUInt32(),
+                Count = r.ReadUInt32()
+            };
+        }
+
+        private bool HasStreamingMeshletSections(BinaryReader r, long sectionsStart, uint sectionCount)
+        {
+            long oldPos = r.BaseStream.Position;
+            bool hasTriangles = false;
+            bool hasDescriptors = false;
+            bool hasMap = false;
+
+            try
+            {
+                r.BaseStream.Position = sectionsStart;
+                for (int i = 0; i < sectionCount; i++)
+                {
+                    long secStart = r.BaseStream.Position;
+                    if (secStart + 20 > r.BaseStream.Length)
+                        break;
+
+                    uint magic = r.ReadUInt32();
+                    uint size = r.ReadUInt32();
+                    r.ReadUInt32(); // header count
+
+                    if (size < 20 || secStart + size > r.BaseStream.Length)
+                        break;
+
+                    uint tableCount = r.ReadUInt32();
+                    uint stride = r.ReadUInt32();
+                    uint payloadSize = size - 12;
+                    bool tableFits = payloadSize >= 8 && (ulong)tableCount * stride <= payloadSize - 8;
+
+                    if (tableFits)
+                    {
+                        if (magic == 0x0001000B && stride == 4)
+                            hasTriangles = true;
+                        else if (magic == 0x0001000C && stride == 16)
+                            hasDescriptors = true;
+                        else if (magic == 0x00010010 && stride == 12)
+                            hasMap = true;
+                    }
+
+                    r.BaseStream.Position = secStart + size;
+                }
+            }
+            finally
+            {
+                r.BaseStream.Position = oldPos;
+            }
+
+            return hasTriangles && hasDescriptors && hasMap;
+        }
+
+        private static bool IsStreamingMeshletSectionMagic(uint magic)
+        {
+            return magic >= 0x0001000A && magic <= 0x00010016;
+        }
+
+        private void ParseStreamingMeshletSection(BinaryReader r, GeometrySection section)
+        {
+            IsStreamingMeshlet = true;
+
+            uint payloadSize = section.Size >= 12 ? section.Size - 12 : 0;
+            if (payloadSize < 8)
+                return;
+
+            uint tableCount = r.ReadUInt32();
+            uint stride = r.ReadUInt32();
+            long dataStart = r.BaseStream.Position;
+
+            StreamingSections.Add(new G1MStreamingSectionInternal
+            {
+                Magic = section.Magic,
+                Size = section.Size,
+                HeaderCount = section.Count,
+                TableCount = tableCount,
+                Stride = stride
+            });
+
+            switch (section.Magic)
+            {
+                case 0x0001000A when stride >= 44:
+                    ParseStreamingQuantization(r, tableCount, stride, dataStart);
+                    break;
+                case 0x0001000B when stride == 4:
+                    ParseStreamingMeshletTriangles(r, tableCount);
+                    break;
+                case 0x0001000C when stride == 16:
+                    ParseStreamingMeshletDescriptors(r, tableCount, stride, dataStart);
+                    break;
+                case 0x0001000D when stride == 60:
+                    ParseStreamingMeshletBounds(r, tableCount, stride, dataStart);
+                    break;
+                case 0x00010010 when stride == 12:
+                    ParseStreamingMeshletMap(r, tableCount, stride, dataStart);
+                    break;
+            }
+        }
+
+        private void ParseStreamingQuantization(BinaryReader r, uint tableCount, uint stride, long dataStart)
+        {
+            for (uint i = 0; i < tableCount; i++)
+            {
+                r.BaseStream.Position = dataStart + i * stride;
+                var center = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                float radius = r.ReadSingle();
+                var bboxMin = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                var bboxMax = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                float unknownFloat = r.ReadSingle();
+
+                StreamingQuantizations.Add(new G1MStreamingQuantizationInternal
+                {
+                    ID = i,
+                    Center = center,
+                    Radius = radius,
+                    BoundingBoxMin = bboxMin,
+                    BoundingBoxMax = bboxMax,
+                    UnknownFloat = unknownFloat
+                });
+            }
+        }
+
+        private void ParseStreamingMeshletTriangles(BinaryReader r, uint tableCount)
+        {
+            for (uint i = 0; i < tableCount; i++)
+            {
+                uint value = r.ReadUInt32();
+                StreamingMeshletTriangles.Add(new G1MStreamingMeshletTriangleInternal
+                {
+                    A = (ushort)(value & 0x3FF),
+                    B = (ushort)((value >> 10) & 0x3FF),
+                    C = (ushort)((value >> 20) & 0x3FF)
+                });
+            }
+        }
+
+        private void ParseStreamingMeshletDescriptors(BinaryReader r, uint tableCount, uint stride, long dataStart)
+        {
+            for (uint i = 0; i < tableCount; i++)
+            {
+                r.BaseStream.Position = dataStart + i * stride;
+                StreamingMeshlets.Add(new G1MStreamingMeshletDescriptorInternal
+                {
+                    ID = i,
+                    TriangleOffset = r.ReadUInt32(),
+                    TriangleCount = r.ReadUInt32(),
+                    IndexOffset = r.ReadUInt32(),
+                    IndexCount = r.ReadUInt32()
+                });
+            }
+        }
+
+        private void ParseStreamingMeshletBounds(BinaryReader r, uint tableCount, uint stride, long dataStart)
+        {
+            for (uint i = 0; i < tableCount; i++)
+            {
+                r.BaseStream.Position = dataStart + i * stride;
+                float[] values = new float[15];
+                for (int j = 0; j < values.Length; j++)
+                    values[j] = r.ReadSingle();
+
+                StreamingMeshletBounds.Add(new G1MStreamingMeshletBoundsInternal
+                {
+                    ID = i,
+                    Values = values,
+                    BoundsMinCandidate = new Vector3(values[9], values[10], values[11]),
+                    BoundsMaxCandidate = new Vector3(values[12], values[13], values[14])
+                });
+            }
+        }
+
+        private void ParseStreamingMeshletMap(BinaryReader r, uint tableCount, uint stride, long dataStart)
+        {
+            for (uint i = 0; i < tableCount; i++)
+            {
+                r.BaseStream.Position = dataStart + i * stride;
+                uint meshletIndex = r.ReadUInt32();
+                uint compactIndex = r.ReadUInt32();
+                uint packedSubmesh = r.ReadUInt32();
+
+                StreamingMeshletMap.Add(new G1MStreamingMeshletMapInternal
+                {
+                    ID = i,
+                    MeshletIndex = meshletIndex,
+                    CompactIndex = compactIndex,
+                    PackedSubmesh = packedSubmesh,
+                    SubmeshIndex = (ushort)(packedSubmesh >> 16),
+                    RemapPage = (ushort)(packedSubmesh & 0xFFFF)
+                });
             }
         }
 

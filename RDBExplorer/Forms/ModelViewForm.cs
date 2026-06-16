@@ -51,7 +51,7 @@ namespace RDBExplorer.Forms
         {
             using OpenFileDialog ofd = new OpenFileDialog();
             ofd.Multiselect = false;
-            ofd.Filter = "Model files (*.g1m)|*.g1m";
+            ofd.Filter = "Model files (*.g1m;*.g1ms)|*.g1m;*.g1ms";
             if (ofd.ShowDialog() == DialogResult.OK)
             {
                 string selectedFile = ofd.FileName;

@@ -4,6 +4,7 @@ public class G1MIndexBufferInternal
 {
     public byte[] Data;
     public int Step; // bytes per index (2 or 4)
+    public int Count => Step > 0 ? Data.Length / Step : 0;
 
     public G1MIndexBufferInternal(byte[] d, int s) { Data = d; Step = s; }
 

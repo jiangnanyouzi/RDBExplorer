@@ -116,6 +116,15 @@ namespace RDBExplorer.Core.Formats.G1M
 
             }
 
+            if (_data.IsStreamingMeshlet
+                && _data.StreamingMeshlets.Count > 0
+                && _data.StreamingMeshletTriangles.Count > 0
+                && _data.StreamingMeshletMap.Count > 0)
+            {
+                BuildStreamingMeshletMeshes(model);
+                return model;
+            }
+
             foreach (var sm in _data.Submeshes)
             {
                 var ib = _data.IndexBuffers[sm.IBRef];
@@ -376,6 +385,223 @@ namespace RDBExplorer.Core.Formats.G1M
             return model;
         }
 
+        private void BuildStreamingMeshletMeshes(GenericModel model)
+        {
+            for (int submeshIndex = 0; submeshIndex < _data.Submeshes.Count; submeshIndex++)
+            {
+                var sm = _data.Submeshes[submeshIndex];
+                if (sm.VBRef < 0 || sm.VBRef >= _data.Layouts.Count || sm.IBRef < 0 || sm.IBRef >= _data.IndexBuffers.Count)
+                    continue;
+
+                var layout = _data.Layouts[sm.VBRef];
+                var ib = _data.IndexBuffers[sm.IBRef];
+                var compactIndices = ib.GetIndices(0, (uint)ib.Count);
+                var palette = sm.BoneMapIndex >= 0 && sm.BoneMapIndex < _data.BonePalettes.Count
+                    ? _data.BonePalettes[sm.BoneMapIndex]
+                    : null;
+
+                var mesh = new GenericMesh
+                {
+                    Name = $"StreamingSubmesh_{sm.ID}",
+                    MaterialName = $"Material_{sm.MaterialIndex}",
+                    PrimitiveType = PrimitiveType.Triangles
+                };
+
+                var vertexMap = new Dictionary<(uint vertexIndex, ushort remapPage), uint>();
+
+                foreach (var map in GetStreamingMeshletMaps(submeshIndex, sm))
+                {
+                    if (map.MeshletIndex >= _data.StreamingMeshlets.Count)
+                        continue;
+
+                    var descriptor = _data.StreamingMeshlets[(int)map.MeshletIndex];
+                    uint triangleEnd = Math.Min(
+                        descriptor.TriangleOffset + descriptor.TriangleCount,
+                        (uint)_data.StreamingMeshletTriangles.Count);
+
+                    for (uint triIndex = descriptor.TriangleOffset; triIndex < triangleEnd; triIndex++)
+                    {
+                        var tri = _data.StreamingMeshletTriangles[(int)triIndex];
+                        if (!TryGetMeshletGlobalIndex(compactIndices, descriptor, tri.A, out uint a)
+                            || !TryGetMeshletGlobalIndex(compactIndices, descriptor, tri.B, out uint b)
+                            || !TryGetMeshletGlobalIndex(compactIndices, descriptor, tri.C, out uint c))
+                        {
+                            continue;
+                        }
+
+                        uint ia = GetStreamingVertexIndex(mesh, vertexMap, a, map.RemapPage, layout, palette);
+                        uint ibIndex = GetStreamingVertexIndex(mesh, vertexMap, b, map.RemapPage, layout, palette);
+                        uint ic = GetStreamingVertexIndex(mesh, vertexMap, c, map.RemapPage, layout, palette);
+
+                        mesh.Triangles.Add(ia);
+                        mesh.Triangles.Add(ibIndex);
+                        mesh.Triangles.Add(ic);
+                    }
+                }
+
+                if (mesh.Vertices.Count > 0 && mesh.Triangles.Count > 0)
+                    model.Meshes.Add(mesh);
+            }
+        }
+
+        private IEnumerable<G1MStreamingMeshletMapInternal> GetStreamingMeshletMaps(int submeshIndex, G1MSubmeshInternal sm)
+        {
+            var mapped = _data.StreamingMeshletMap
+                .Where(x => x.SubmeshIndex == submeshIndex && x.MeshletIndex < _data.StreamingMeshlets.Count)
+                .ToList();
+
+            if (mapped.Count > 0)
+                return mapped;
+
+            uint start = sm.VBStart;
+            uint end = Math.Min(start + sm.VertexCount, (uint)_data.StreamingMeshlets.Count);
+            var fallback = new List<G1MStreamingMeshletMapInternal>();
+            for (uint meshletIndex = start; meshletIndex < end; meshletIndex++)
+            {
+                fallback.Add(new G1MStreamingMeshletMapInternal
+                {
+                    MeshletIndex = meshletIndex,
+                    SubmeshIndex = (ushort)submeshIndex
+                });
+            }
+            return fallback;
+        }
+
+        private static bool TryGetMeshletGlobalIndex(
+            uint[] compactIndices,
+            G1MStreamingMeshletDescriptorInternal descriptor,
+            ushort localIndex,
+            out uint globalIndex)
+        {
+            globalIndex = 0;
+            if (localIndex >= descriptor.IndexCount)
+                return false;
+
+            uint compactIndex = descriptor.IndexOffset + localIndex;
+            if (compactIndex >= compactIndices.Length)
+                return false;
+
+            globalIndex = compactIndices[compactIndex];
+            return true;
+        }
+
+        private uint GetStreamingVertexIndex(
+            GenericMesh mesh,
+            Dictionary<(uint vertexIndex, ushort remapPage), uint> vertexMap,
+            uint vertexIndex,
+            ushort remapPage,
+            G1MLayoutInternal layout,
+            List<uint>? palette)
+        {
+            var key = (vertexIndex, remapPage);
+            if (vertexMap.TryGetValue(key, out uint existing))
+                return existing;
+
+            uint newIndex = (uint)mesh.Vertices.Count;
+            mesh.Vertices.Add(ReadStreamingVertex((int)vertexIndex, remapPage, layout, palette));
+            vertexMap[key] = newIndex;
+            return newIndex;
+        }
+
+        private GenericVertex ReadStreamingVertex(int vertexIndex, ushort remapPage, G1MLayoutInternal layout, List<uint>? palette)
+        {
+            var vertex = new GenericVertex
+            {
+                Clr = Vector4.One,
+                Weights = new Vector4(1, 0, 0, 0)
+            };
+
+            foreach (var sem in layout.Semantics)
+            {
+                if (sem.BufIdx >= layout.BufferIndices.Count)
+                    continue;
+
+                uint bufferIndex = layout.BufferIndices[sem.BufIdx];
+                if (bufferIndex >= _data.VertexBuffers.Count)
+                    continue;
+
+                var vb = _data.VertexBuffers[(int)bufferIndex];
+                int offset = vertexIndex * vb.Stride + sem.Offset;
+                if (offset < 0 || offset >= vb.Data.Length)
+                    continue;
+
+                Vector4 val = sem.Type == G1MSemanticType.POSITION
+                    ? ReadStreamingPosition(vb, offset, sem.Format, remapPage)
+                    : vb.ReadVec4(offset, sem.Format);
+
+                switch (sem.Type)
+                {
+                    case G1MSemanticType.POSITION:
+                        vertex.Pos = val.Xyz;
+                        break;
+                    case G1MSemanticType.NORMAL:
+                        vertex.Nrm = val.Xyz;
+                        break;
+                    case G1MSemanticType.TEXCOORD:
+                        if (sem.Layer == 0)
+                            vertex.UV0 = val.Xy;
+                        else if (sem.Layer == 1)
+                            vertex.UV1 = val.Xy;
+                        else if (sem.Layer == 2)
+                            vertex.UV2 = val.Xy;
+                        break;
+                    case G1MSemanticType.BLENDWEIGHT:
+                        vertex.Weights = val;
+                        break;
+                    case G1MSemanticType.BLENDINDICES:
+                        vertex.Bones = Remap(val, palette);
+                        break;
+                    case G1MSemanticType.TANGENT:
+                        vertex.Tan = val;
+                        break;
+                    case G1MSemanticType.BINORMAL:
+                        vertex.Bit = val;
+                        break;
+                    case G1MSemanticType.COLOR:
+                        if (sem.Layer == 0)
+                            vertex.Clr = val;
+                        else if (sem.Layer == 1)
+                            vertex.Clr1 = val;
+                        break;
+                    case G1MSemanticType.FOG:
+                        vertex.Fog = val;
+                        break;
+                    case G1MSemanticType.PSIZE:
+                        vertex.Extra = val;
+                        break;
+                }
+            }
+
+            return vertex;
+        }
+
+        private Vector4 ReadStreamingPosition(
+            G1MVertexBufferInternal vb,
+            int offset,
+            EG1MGVADatatype format,
+            ushort remapPage)
+        {
+            if (format != EG1MGVADatatype.VADataType_UShort_x4 || offset + 8 > vb.Data.Length)
+                return vb.ReadVec4(offset, format);
+
+            ushort rawX = BitConverter.ToUInt16(vb.Data, offset);
+            ushort rawY = BitConverter.ToUInt16(vb.Data, offset + 2);
+            ushort rawZ = BitConverter.ToUInt16(vb.Data, offset + 4);
+            ushort rawW = BitConverter.ToUInt16(vb.Data, offset + 6);
+
+            int quantizationIndex = remapPage < _data.StreamingQuantizations.Count ? remapPage : 0;
+            if (quantizationIndex >= _data.StreamingQuantizations.Count)
+                return new Vector4(rawX, rawY, rawZ, rawW);
+
+            var quantization = _data.StreamingQuantizations[quantizationIndex];
+            Vector3 position = quantization.Center + new Vector3(
+                (rawX - 32768.0f) / 32767.0f,
+                (rawY - 32768.0f) / 32767.0f,
+                (rawZ - 32768.0f) / 32767.0f) * quantization.Radius;
+
+            return new Vector4(position, rawW);
+        }
+
         private void PrecomputeNunoBones()
         {
             _nunoWorldPoints.Clear();
@@ -431,7 +657,7 @@ namespace RDBExplorer.Core.Formats.G1M
                 }
             }
         }
-        private Vector4 Remap(Vector4 raw, List<uint> palette)
+        private Vector4 Remap(Vector4 raw, List<uint>? palette)
         {
             if (palette == null)
             {

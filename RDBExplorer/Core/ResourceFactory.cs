@@ -9,6 +9,7 @@ namespace RDBExplorer.Core
         {
             return type switch
             {
+                KTFileType.StreamingMeshletModelData => new StreamingMeshletModelDataWrapper(),
                 KTFileType.G1MXFile => new G1MXWrapper(),
                 KTFileType.KTIDFileBinary => new KTIDWrapper(),
                 KTFileType.ObjectDatabaseFile => new KidsObjDbParserWrapper(),

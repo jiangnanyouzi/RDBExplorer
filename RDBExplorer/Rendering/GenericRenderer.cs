@@ -130,7 +130,7 @@ namespace Metanoia.Rendering
 
         public void RenderShader(Matrix4 mvp, bool renderSkeleton = false)
         {
-            if (Model == null)
+            if (Model == null || GenericShader == null || VertexBuffer == null || IndexBuffer == null)
             {
                 return;
             }

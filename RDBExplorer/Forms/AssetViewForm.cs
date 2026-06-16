@@ -341,7 +341,9 @@ namespace RDBExplorer.Forms
 
         private void OpenItem(EntryData entry)
         {
-            if (!string.IsNullOrEmpty(entry.Name) && entry.Name.EndsWith(".g1m")) { 
+            if (!string.IsNullOrEmpty(entry.Name) &&
+                (entry.Name.EndsWith(".g1m", StringComparison.OrdinalIgnoreCase)
+                 || entry.Name.EndsWith(".g1ms", StringComparison.OrdinalIgnoreCase))) {
                 new ModelViewForm(entry.Name, entry.Data).Show();
             }
         }

@@ -6,6 +6,7 @@ public class G1MVertexBufferInternal
 {
     public byte[] Data;
     public int Stride;
+    public int Count => Stride > 0 ? Data.Length / Stride : 0;
 
     public G1MVertexBufferInternal(byte[] bufferData, int stride)
     {

@@ -75,6 +75,9 @@ namespace RDBExplorer.Services
                             newForm = new AssetViewForm(item, entryData, explorer);
                         }
                         break;
+                    case KTFileType.StreamingMeshletModelData:
+                        newForm = new ModelViewForm(item, entryData, explorer);
+                        break;
                     default:
                         newForm = new AssetViewForm(item, entryData, explorer);
                         break;
