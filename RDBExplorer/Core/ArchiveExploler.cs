@@ -3,6 +3,7 @@ using RDBExplorer.Core.Formats.ObjectDatabaseFile;
 using RDBExplorer.Core.Models;
 using RDBExplorer.Services;
 using RDBExplorer.Utils;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace RDBExplorer.Core
@@ -57,6 +58,18 @@ namespace RDBExplorer.Core
             else if (File.Exists(rdbBinPath))
             {
                 _isWoLong = true;
+
+                // The slow part is BuildHashNameCache scanning all .rdb.bin files.
+                // Cache the parsed result so it only runs once per unchanged archive set.
+                string cacheKey = ComputeCacheKey(rdbFilePath, rdbBinPath);
+                string cacheFile = GetCacheFilePath(rdbFilePath);
+
+                if (TryLoadCache(cacheFile, cacheKey))
+                {
+                    Console.WriteLine("[ArchiveExploler] Loaded from cache.");
+                    return;
+                }
+
                 var rdb = new WoLongRDBReader();
                 RDBEntries = rdb.Read(rdbFilePath);
             }
@@ -74,6 +87,7 @@ namespace RDBExplorer.Core
             if (_isWoLong)
             {
                 BuildHashNameCache(rdbFilePath);
+                SaveCache(GetCacheFilePath(rdbFilePath), ComputeCacheKey(rdbFilePath, rdbBinPath));
             }
         }
 
@@ -494,5 +508,224 @@ namespace RDBExplorer.Core
             }
             return fileName;
         }
+
+        #region Cache
+
+        private const int CACHE_VERSION = 1;
+        private const string CACHE_MAGIC = "RDBC";
+
+        private string GetCacheDirectory()
+        {
+            string cacheDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "RDBExplorer", "cache");
+            Directory.CreateDirectory(cacheDir);
+            return cacheDir;
+        }
+
+        private string GetCacheFilePath(string rdbFilePath)
+        {
+            string cacheDir = GetCacheDirectory();
+            string pathHash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(rdbFilePath))));
+            return Path.Combine(cacheDir, $"{pathHash}.rdbcache");
+        }
+
+        private string ComputeCacheKey(string rdbFilePath, string rdbBinPath)
+        {
+            var sb = new StringBuilder();
+            AppendFileInfo(sb, rdbFilePath);
+            AppendFileInfo(sb, rdbBinPath);
+
+            foreach (string binFile in Directory.GetFiles(_workDir, "*.rdb.bin")
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                AppendFileInfo(sb, binFile);
+            }
+
+            using var sha = SHA256.Create();
+            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+            return Convert.ToHexString(hash);
+        }
+
+        private static void AppendFileInfo(StringBuilder sb, string path)
+        {
+            var fi = new FileInfo(path);
+            sb.Append(fi.FullName).Append(':')
+              .Append(fi.LastWriteTimeUtc.Ticks).Append(':')
+              .Append(fi.Length).Append(';');
+        }
+
+        private void SaveCache(string cacheFilePath, string cacheKey)
+        {
+            try
+            {
+                using var fs = new FileStream(cacheFilePath, FileMode.Create, FileAccess.Write);
+                using var writer = new BinaryWriter(fs);
+
+                writer.Write(Encoding.ASCII.GetBytes(CACHE_MAGIC));
+                writer.Write(CACHE_VERSION);
+                writer.Write(_isWoLong ? 1 : 0);
+
+                byte[] keyBytes = Encoding.UTF8.GetBytes(cacheKey);
+                writer.Write(keyBytes.Length);
+                writer.Write(keyBytes);
+
+                writer.Write(RDBEntries.Count);
+                foreach (var entry in RDBEntries)
+                {
+                    WriteEntry(writer, entry);
+                }
+
+                writer.Write(_ktidHashNameCache.Count);
+                foreach (var kvp in _ktidHashNameCache)
+                {
+                    writer.Write(kvp.Key);
+                    WriteEntry(writer, kvp.Value);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ArchiveExploler] Failed to save cache: {ex.Message}");
+                try { File.Delete(cacheFilePath); } catch { }
+            }
+        }
+
+        private bool TryLoadCache(string cacheFilePath, string cacheKey)
+        {
+            try
+            {
+                if (!File.Exists(cacheFilePath))
+                    return false;
+
+                using var fs = new FileStream(cacheFilePath, FileMode.Open, FileAccess.Read);
+                using var reader = new BinaryReader(fs);
+
+                string magic = Encoding.ASCII.GetString(reader.ReadBytes(4));
+                if (magic != CACHE_MAGIC)
+                    return false;
+
+                int version = reader.ReadInt32();
+                if (version != CACHE_VERSION)
+                    return false;
+
+                bool isWoLong = reader.ReadInt32() != 0;
+
+                int keyLength = reader.ReadInt32();
+                string storedKey = Encoding.UTF8.GetString(reader.ReadBytes(keyLength));
+                if (storedKey != cacheKey)
+                    return false;
+
+                _isWoLong = isWoLong;
+
+                int entryCount = reader.ReadInt32();
+                RDBEntries = new List<RDBEntry>(entryCount);
+                for (int i = 0; i < entryCount; i++)
+                {
+                    RDBEntries.Add(ReadEntry(reader));
+                }
+
+                _ktidCache = RDBEntries.GroupBy(e => e.FileKtid)
+                    .ToDictionary(g => g.Key, g => g.First());
+
+                // Rebuild hash-name cache while preserving references to RDBEntries where possible.
+                int hashCacheCount = reader.ReadInt32();
+                _ktidHashNameCache = new Dictionary<uint, RDBEntry>(hashCacheCount);
+                var offsetMap = RDBEntries
+                    .Where(e => e.Location.Offset > 0 && !string.IsNullOrEmpty(e.Location.ContainerPath))
+                    .GroupBy(e => (long)e.Location.Offset)
+                    .ToDictionary(g => g.Key, g => g.First());
+
+                for (int i = 0; i < hashCacheCount; i++)
+                {
+                    uint hashName = reader.ReadUInt32();
+                    var cachedEntry = ReadEntry(reader);
+
+                    if (offsetMap.TryGetValue((long)cachedEntry.Location.Offset, out var existing))
+                    {
+                        _ktidHashNameCache[hashName] = existing;
+                    }
+                    else
+                    {
+                        _ktidHashNameCache[hashName] = cachedEntry;
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ArchiveExploler] Failed to load cache: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static void WriteEntry(BinaryWriter writer, RDBEntry entry)
+        {
+            WriteString(writer, entry.Magic);
+            writer.Write(entry.Version);
+            writer.Write(entry.EntrySize);
+            writer.Write(entry.DataSize);
+            writer.Write(entry.FileSize);
+            writer.Write(entry.EntryType);
+            writer.Write(entry.FileKtid);
+            writer.Write(entry.TypeInfoKtid);
+            writer.Write((uint)entry.Flags);
+
+            byte[] unk = entry.UnkContent ?? Array.Empty<byte>();
+            writer.Write(unk.Length);
+            if (unk.Length > 0)
+                writer.Write(unk);
+
+            writer.Write(entry.EntryOffsetInRDB);
+            writer.Write((uint)entry.Location.NewFlags);
+            WriteString(writer, entry.Location.ContainerPath);
+            writer.Write(entry.Location.Offset);
+            writer.Write(entry.Location.SizeInContainer);
+            writer.Write(entry.Location.FDataId);
+        }
+
+        private static RDBEntry ReadEntry(BinaryReader reader)
+        {
+            return new RDBEntry
+            {
+                Magic = ReadString(reader),
+                Version = reader.ReadUInt32(),
+                EntrySize = reader.ReadInt64(),
+                DataSize = reader.ReadInt64(),
+                FileSize = reader.ReadInt64(),
+                EntryType = reader.ReadUInt32(),
+                FileKtid = reader.ReadUInt32(),
+                TypeInfoKtid = reader.ReadUInt32(),
+                Flags = (RDBFlags)reader.ReadUInt32(),
+                UnkContent = reader.ReadBytes(reader.ReadInt32()),
+                EntryOffsetInRDB = reader.ReadInt64(),
+                Location = new EntryLocation
+                {
+                    NewFlags = (RDBFlagsNew)reader.ReadUInt32(),
+                    ContainerPath = ReadString(reader),
+                    Offset = reader.ReadUInt64(),
+                    SizeInContainer = reader.ReadUInt64(),
+                    FDataId = reader.ReadInt32()
+                }
+            };
+        }
+
+        private static void WriteString(BinaryWriter writer, string value)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);
+            writer.Write(bytes.Length);
+            writer.Write(bytes);
+        }
+
+        private static string ReadString(BinaryReader reader)
+        {
+            int length = reader.ReadInt32();
+            if (length <= 0)
+                return string.Empty;
+            return Encoding.UTF8.GetString(reader.ReadBytes(length));
+        }
+
+        #endregion
     }
 }
